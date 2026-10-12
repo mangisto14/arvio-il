@@ -3,3 +3,4 @@ node_modules/
 dist/
 .dev.vars
 wrangler.toml.local
+wrangler.selfhost.toml

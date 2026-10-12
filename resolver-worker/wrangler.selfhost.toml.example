@@ -1,0 +1,33 @@
+# Self-hosted relay for an independent ARVIO deployment.
+# Copy to wrangler.selfhost.toml (git-ignored), fill in the placeholders, then:
+#   npx wrangler secret put MEDIA_SIGNING_KEY -c wrangler.selfhost.toml
+#   npx wrangler deploy -c wrangler.selfhost.toml
+# Never reuse wrangler.toml: its routes and KV namespace belong to arvio.tv.
+name = "arvio-selfhost-relay"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+# Public egress only; custom fetch ports are honoured from 2024-09-02.
+compatibility_flags = ["global_fetch_strictly_public"]
+workers_dev = true
+preview_urls = false
+
+# Request logs would contain IPTV links (and their credentials). Keep off.
+[observability]
+enabled = false
+
+[vars]
+# Exact origin of your ARVIO site (no trailing slash).
+ALLOWED_ORIGINS = "https://your-arvio.example"
+# Hosts the relay may fetch for an unsigned request: your IPTV provider's
+# playlist/stream host names, and optionally your debrid CDN for downloads.
+# "*.example.com" matches subdomains only. No URLs, ports or credentials here.
+MEDIA_ALLOWED_HOSTS = "iptv-provider.example"
+# Lifetime of the signed segment/variant links the relay writes into playlists.
+MEDIA_SIGNATURE_TTL_SECONDS = "43200"
+# Disables the upstream-only /api/tmdb edge cache and its arvio.tv fallback.
+TMDB_EDGE_CACHE = "off"
+SOURCE_CACHE_TTL_SECONDS = "180"
+ADDON_TIMEOUT_MS = "15000"
+ADDON_EXTENDED_TIMEOUT_MS = "35000"
+# No [[kv_namespaces]] and no routes: the worker runs on *.workers.dev.
+# MEDIA_SIGNING_KEY is a secret (wrangler secret put), never a [vars] entry.

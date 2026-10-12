@@ -1,6 +1,10 @@
-type Env = {
+import { blockedHost, corsHeaders, decodeMediaHeaders, handleMedia, originRejected, readTextCapped, type RelayEnv } from "./mediaRelay";
+
+type Env = RelayEnv & {
   RESOLVER_KV?: KVNamespace;
   ALLOWED_ORIGINS?: string;
+  /** "off" disables the /api/tmdb edge cache (and its upstream fallback origin). */
+  TMDB_EDGE_CACHE?: string;
   SOURCE_CACHE_TTL_SECONDS?: string;
   ADDON_TIMEOUT_MS?: string;
   ADDON_EXTENDED_TIMEOUT_MS?: string;
@@ -146,7 +150,7 @@ export default {
       // household IP and every app boot re-triggered it (white screen / "No
       // episodes found"). Misses go to the stable netlify.app hostname from
       // Cloudflare egress, so client IPs never hit Netlify's counters for TMDB.
-      if (url.pathname.startsWith("/api/tmdb/") && request.method === "GET") {
+      if (url.pathname.startsWith("/api/tmdb/") && request.method === "GET" && env.TMDB_EDGE_CACHE !== "off") {
         return tmdbEdgeCache(request, env);
       }
       // Generic JSON API relay for allowlisted hosts (debrid APIs, cinemeta,
@@ -166,7 +170,7 @@ export default {
         return subtitle(request, env);
       }
       if (url.pathname === "/media" && (request.method === "GET" || request.method === "HEAD")) {
-        return media(request, env);
+        return handleMedia(request, env);
       }
       if (url.pathname === "/launch" && request.method === "GET") {
         return launchPage(request, env);
@@ -405,9 +409,18 @@ async function subtitle(request: Request, env: Env) {
     return json({ error: "Invalid url" }, request, env, 400);
   }
   if (!["http:", "https:"].includes(target.protocol)) return json({ error: "Unsupported subtitle protocol" }, request, env, 400);
+  if (originRejected(request, env)) return json({ error: "Origin not allowed" }, request, env, 403);
+  if (target.username || target.password || blockedHost(target.hostname)) return json({ error: "Subtitle target not allowed" }, request, env, 403);
 
-  const response = await fetch(target);
-  const text = await response.text();
+  let response: Response;
+  try {
+    response = await fetch(target, { signal: AbortSignal.timeout(20_000) });
+  } catch {
+    return json({ error: "Subtitle unavailable" }, request, env, 502);
+  }
+  if (response.url && blockedHost(new URL(response.url).hostname)) return json({ error: "Subtitle target not allowed" }, request, env, 403);
+  const text = await readTextCapped(response.body, 5 * 1024 * 1024);
+  if (text === null) return json({ error: "Subtitle exceeds the size limit" }, request, env, 502);
   const webvtt = text.trimStart().startsWith("WEBVTT") ? text : srtToVtt(text);
   return new Response(webvtt, {
     status: response.ok ? 200 : response.status,
@@ -417,128 +430,6 @@ async function subtitle(request: Request, env: Env) {
       ...corsHeaders(request, env)
     }
   });
-}
-
-const BLOCKED_MEDIA_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "0.0.0.0", "169.254.169.254"]);
-
-async function media(request: Request, env: Env) {
-  const input = new URL(request.url);
-  const raw = input.searchParams.get("url");
-  if (!raw) return json({ error: "Missing url" }, request, env, 400);
-  let target: URL;
-  try {
-    target = new URL(raw);
-  } catch {
-    return json({ error: "Invalid url" }, request, env, 400);
-  }
-  if (!["http:", "https:"].includes(target.protocol) || BLOCKED_MEDIA_HOSTS.has(target.hostname)) {
-    return json({ error: "Blocked media target" }, request, env, 400);
-  }
-  // hls.js/mpegts.js requests carry an Origin header; enforce the allowlist for
-  // those. Native <video> requests have no Origin and pass through.
-  const origin = request.headers.get("origin");
-  if (origin) {
-    const allowed = (env.ALLOWED_ORIGINS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-    if (allowed.length && !allowed.includes(origin)) {
-      return json({ error: "Origin not allowed" }, request, env, 403);
-    }
-  }
-
-  const forwarded = new Headers();
-  forwarded.set("accept", "*/*");
-  forwarded.set("user-agent", decodeMediaHeaders(input.searchParams.get("h"))["User-Agent"] ?? "VLC/3.0.20 LibVLC/3.0.20");
-  for (const [key, value] of Object.entries(decodeMediaHeaders(input.searchParams.get("h")))) {
-    if (/^(user-agent|referer|origin|icy-metadata|x-forwarded-for|authorization|cookie)$/i.test(key)) {
-      forwarded.set(key, value);
-    }
-  }
-  const range = request.headers.get("range");
-  if (range) forwarded.set("range", range);
-
-  let upstream: Response;
-  try {
-    upstream = await fetch(target.toString(), {
-      method: request.method,
-      headers: forwarded,
-      redirect: "follow",
-      signal: AbortSignal.timeout(30_000)
-    });
-  } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "Upstream fetch failed" }, request, env, 502);
-  }
-
-  const contentType = upstream.headers.get("content-type") ?? "";
-  const finalUrl = safeUrl(upstream.url) ?? target;
-  // dl=1 turns the proxy into a download: Content-Disposition attachment makes
-  // every browser (incl. iOS Safari/Chrome, which preview inline files instead
-  // of downloading) hand the file to its download manager with progress UI.
-  const wantsDownload = input.searchParams.get("dl") === "1";
-  const looksLikePlaylist =
-    !wantsDownload && (
-      contentType.toLowerCase().includes("mpegurl") ||
-      /\.m3u8?(?:$|[?#])/i.test(finalUrl.pathname) ||
-      /\.m3u8?(?:$|[?#])/i.test(target.pathname)
-    );
-
-  if (looksLikePlaylist && request.method === "GET") {
-    const text = await upstream.text();
-    if (text.trimStart().startsWith("#EXTM3U") || text.includes("#EXTINF")) {
-      const rewritten = rewriteHlsPlaylist(text, finalUrl, input);
-      return new Response(rewritten, {
-        status: upstream.status,
-        headers: {
-          "content-type": "application/vnd.apple.mpegurl",
-          "cache-control": "no-store",
-          ...corsHeaders(request, env)
-        }
-      });
-    }
-    return new Response(text, {
-      status: upstream.status,
-      headers: {
-        "content-type": contentType || "text/plain; charset=utf-8",
-        "cache-control": "no-store",
-        ...corsHeaders(request, env)
-      }
-    });
-  }
-
-  const headers = new Headers(corsHeaders(request, env));
-  headers.set("content-type", contentType || "application/octet-stream");
-  headers.set("cache-control", "no-store");
-  headers.set("accept-ranges", upstream.headers.get("accept-ranges") ?? "bytes");
-  headers.set("access-control-expose-headers", "content-length,content-range,accept-ranges,etag,last-modified");
-  const contentLength = upstream.headers.get("content-length");
-  const contentRange = upstream.headers.get("content-range");
-  if (contentLength) headers.set("content-length", contentLength);
-  if (contentRange) headers.set("content-range", contentRange);
-  // Resume validators: browsers (and download managers) only auto-resume an
-  // interrupted download when the original response carried an ETag or
-  // Last-Modified — without one, Chrome can't prove the file is unchanged and
-  // abandons the download ("stops halfway, can't continue"). Small files finish
-  // before any interruption so the gap never showed; big 4K remuxes (hours-long)
-  // always hit a network blip, and had no validator to resume against. The
-  // TorBox CDN sends Last-Modified — forward it (and ETag when present) so a
-  // dropped multi-GB download can pick up where it left off.
-  const etag = upstream.headers.get("etag");
-  const lastModified = upstream.headers.get("last-modified");
-  if (etag) headers.set("etag", etag);
-  if (lastModified) headers.set("last-modified", lastModified);
-  if (wantsDownload) {
-    const rawName = input.searchParams.get("filename") ?? "";
-    const safeName = rawName.replace(/[^\w .,()\[\]&'-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 150) || "arvio-download.mkv";
-    headers.set("content-disposition", `attachment; filename="${safeName}"`);
-    // Observable via `wrangler tail` — diagnose client download issues.
-    console.log(JSON.stringify({
-      dl: true,
-      host: target.hostname,
-      upstreamStatus: upstream.status,
-      contentLength: contentLength ?? null,
-      range: range ?? null,
-      ua: request.headers.get("user-agent")?.slice(0, 80) ?? null
-    }));
-  }
-  return new Response(request.method === "HEAD" ? null : upstream.body, { status: upstream.status, headers });
 }
 
 // Interstitial that opens an external-player URL scheme from a real Safari
@@ -572,52 +463,6 @@ function launchPage(request: Request, env: Env) {
   return new Response(html, {
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
   });
-}
-
-function rewriteHlsPlaylist(text: string, baseUrl: URL, workerUrl: URL) {
-  const headersParam = workerUrl.searchParams.get("h");
-  const proxied = (rawTarget: string) => {
-    const trimmed = rawTarget.trim();
-    if (!trimmed || trimmed.startsWith("data:") || trimmed.startsWith("blob:")) return rawTarget;
-    let absolute: URL;
-    try {
-      absolute = new URL(trimmed, baseUrl);
-    } catch {
-      return rawTarget;
-    }
-    if (!["http:", "https:"].includes(absolute.protocol)) return rawTarget;
-    // Root-relative so the player resolves it against whichever origin served
-    // this manifest (works for both the production route and wrangler dev).
-    const params = new URLSearchParams();
-    params.set("url", absolute.toString());
-    if (headersParam) params.set("h", headersParam);
-    return `/media?${params.toString()}`;
-  };
-
-  return text.split(/\r?\n/).map((line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return line;
-    if (!trimmed.startsWith("#")) return proxied(line);
-    return line.replace(/URI="([^"]+)"/g, (_match, uri: string) => `URI="${proxied(uri)}"`);
-  }).join("\n");
-}
-
-function decodeMediaHeaders(raw: string | null): Record<string, string> {
-  if (!raw) return {};
-  try {
-    const decoded = JSON.parse(atob(raw.replace(/-/g, "+").replace(/_/g, "/"))) as Record<string, string>;
-    return decoded && typeof decoded === "object" ? decoded : {};
-  } catch {
-    return {};
-  }
-}
-
-function safeUrl(value: string) {
-  try {
-    return new URL(value);
-  } catch {
-    return null;
-  }
 }
 
 function streamIds(item: MediaItem, season?: number, episode?: number) {
@@ -846,21 +691,6 @@ async function sourceCacheKey(payload: SourcesRequest) {
   });
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalized));
   return `sources:v2:${Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
-function corsHeaders(request: Request, env: Env) {
-  const origin = request.headers.get("origin") ?? "";
-  const allowed = (env.ALLOWED_ORIGINS ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const allowOrigin = allowed.includes(origin) ? origin : allowed[0] ?? "*";
-  return {
-    "access-control-allow-origin": allowOrigin,
-    "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type,authorization,range",
-    "vary": "origin"
-  };
 }
 
 function json(value: unknown, request: Request, env: Env, status = 200) {
