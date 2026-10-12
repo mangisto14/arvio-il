@@ -26,7 +26,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLivePlayerDock } from "./useLivePlayerDock";
 import { usePlayerEpisodeMetadata } from "./usePlayerEpisodeMetadata";
-import { config } from "@/lib/config";
+import { config, hasResolverConfig } from "@/lib/config";
 import { createPendingExternalPlayback } from "@/lib/externalPlayback";
 import { isLiveStreamOrSportsItem, saveProgress, saveWatchedState } from "@/lib/cloud";
 import { cachedDebridDirectUrl, invalidateDebridDirectUrl, isUncachedDebridStream, parseDebridStream, resolveDebridDirectUrl } from "@/lib/debrid";
@@ -35,6 +35,7 @@ import { copyStreamUrl, externalLaunchMode, openExternalPlayer, openInAnyPlayer 
 import { proxiedUrl } from "@/lib/http";
 import { attachPlayback, type PlaybackHandle, type PlaybackTracks, type PlaybackError } from "@/lib/player";
 import { resolverMediaUrl, resolverSubtitleUrl } from "@/lib/resolver";
+import { livePlaybackBlocker, playbackAttemptRoute, playbackDiagnosticLine, summarizeStreamUrl, type LivePlaybackBlocker } from "@/lib/iptvPlaybackDiagnostics";
 import { attachExternalSubtitle, positionSubtitleCues, type SubtitleLoadState } from "@/lib/playerSubtitles";
 import { browserAutoplayCandidates } from "@/lib/browserAutoplay";
 import { sourcePickerScore, streamSizeBytes } from "@/lib/sourceRank";
@@ -376,6 +377,8 @@ function VideoPlayer({
   const [fullscreen, setFullscreen] = useState(false);
   const [error, setError] = useState(false);
   const [errorDetail, setErrorDetail] = useState("");
+  // A known reason a live channel cannot play here (e.g. http:// on https).
+  const [liveBlocker, setLiveBlocker] = useState<LivePlaybackBlocker | null>(null);
   const failureDiagnosticRef = useRef<{ failure_kind: string; phase: "startup" | "playback"; transport?: string }>({ failure_kind: "unknown", phase: "startup" });
   useEffect(() => {
     if (error) void trackPremiumDaily(authClient, "playback_failed", {
@@ -844,6 +847,7 @@ function VideoPlayer({
 
     setError(false);
     setErrorDetail("");
+    setLiveBlocker(null);
     failureDiagnosticRef.current = { failure_kind: "unknown", phase: "startup" };
     setBuffering(true);
     lastSavedRef.current = 0;
@@ -914,6 +918,15 @@ function VideoPlayer({
     }
     const uniqueAttempts = [...new Set(attempts)];
     let attemptIndex = 0;
+    // Safe live diagnostics: scheme/format/route tokens only, never the URL.
+    const pageLocation = iptvRelay ? window.location : undefined;
+    const liveDiagnostics = iptvRelay ? {
+      ...summarizeStreamUrl(stream.url),
+      page: pageLocation?.protocol.replace(/:$/, ""),
+      relay: hasResolverConfig() ? "resolver" : config.allowNetlifyMediaProxy ? "app-proxy" : "none"
+    } : null;
+    const attemptRoute = (index: number) => playbackAttemptRoute(uniqueAttempts[index] ?? "", pageLocation?.origin ?? "", config.resolverUrl);
+    if (liveDiagnostics) console.info(playbackDiagnosticLine("start", { ...liveDiagnostics, attempts: uniqueAttempts.length }));
     // Some sources hang forever without ever firing an "error" event (the CDN
     // accepts the connection but never delivers a playable moov/metadata). A
     // plain error-based ladder can't recover from that. Arm a per-attempt stall
@@ -1046,6 +1059,12 @@ function VideoPlayer({
           return;
         }
       }
+      if (liveDiagnostics) {
+        console.warn(playbackDiagnosticLine("attempt-failed", {
+          attempt: `${attemptIndex + 1}-of-${uniqueAttempts.length}`, route: attemptRoute(attemptIndex),
+          transport: fault?.transport, failure: fault?.kind, code: fault?.code, media_error: video.error?.code
+        }));
+      }
       attemptIndex += 1;
       const nextUrl = uniqueAttempts[attemptIndex];
       if (nextUrl) {
@@ -1088,6 +1107,12 @@ function VideoPlayer({
       window.clearTimeout(stallTimer);
       window.clearTimeout(playableWatchdog);
       detach?.();
+      if (liveDiagnostics) {
+        // Name a cause the ladder could never get past instead of a bare failure.
+        const blocker = livePlaybackBlocker(stream.url, { pageProtocol: pageLocation?.protocol ?? "", hasRelay: liveDiagnostics.relay !== "none" });
+        setLiveBlocker(blocker);
+        console.warn(playbackDiagnosticLine("failed", { ...liveDiagnostics, blocker: blocker ?? "none" }));
+      }
       setBuffering(false);
       setError(true);
       setShowControls(true);
@@ -1365,7 +1390,7 @@ function VideoPlayer({
   }, [activePanel]);
 
   const retryPlayback = useCallback(() => {
-    setError(false); setErrorDetail(""); setBuffering(true);
+    setError(false); setErrorDetail(""); setLiveBlocker(null); setBuffering(true);
     const position = videoRef.current?.currentTime ?? 0;
     if (position > 0) resumeAtRef.current = position + (stream.playbackSession?.startOffset ?? 0);
     // Terminal failure stops a home-server session. Ask the server for a fresh
@@ -1638,6 +1663,13 @@ function VideoPlayer({
       {error && (
         <div className="player-error">
           <p>{liveTv ? translateUi("This channel could not be played right now.") : translateUi("This source could not be played in the browser.")}</p>
+          {liveBlocker && <small className="player-error-reason" role="status">
+            {liveBlocker === "insecure-without-relay"
+              ? translateUi("This channel uses an insecure http link, which browsers block on a secure https site. Open it in VLC, use an https playlist, or ask the site owner to configure an HTTPS media relay.")
+              : liveBlocker === "unsupported-scheme"
+                ? translateUi("This channel uses a stream type browsers cannot play. Open it in VLC.")
+                : translateUi("This channel has no valid stream link.")}
+          </small>}
           <span>
             {translateUi(errorDetail) || translateUi("The source could not be opened. Its network access, browser permissions or media format may be unsupported. Try another source or an external player.")}
           </span>

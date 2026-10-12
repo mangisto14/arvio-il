@@ -7,6 +7,7 @@
 .player-overlay.player-docked .player-error { padding: 12px; gap: 4px; font-size: 12px; }
 .player-overlay.player-docked .player-error > span { display: none; }
 .player-overlay.player-docked .player-error p { font-size: 13px; }
+.player-overlay.player-docked .player-error-reason { font-size: 11px; line-height: 1.3; }
 .player-overlay.player-docked .player-error-actions { flex-wrap: wrap; gap: 4px; }
 .player-overlay.player-docked .player-error-actions button { font-size: 12px; padding: 6px; min-height: 32px; }
 .player-dock-controls { position: absolute; z-index: 50; bottom: 8px; inset-inline: 8px; display: flex; gap: 6px; align-items: center; pointer-events: none; }

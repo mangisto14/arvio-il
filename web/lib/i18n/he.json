@@ -6,5 +6,8 @@
   "Completed": "הושלמו",
   "Dropped": "ננטשו",
   "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: יש להשתמש בכתובת התואמת ל-Jellyfin. פרופיל אופציונלי: username#ProfileName. פרופיל מוגן: password#PIN.",
-  "None of your enabled addons provide playback sources.": "אף אחת מההרחבות הפעילות שלך אינה מספקת מקורות לניגון."
+  "None of your enabled addons provide playback sources.": "אף אחת מההרחבות הפעילות שלך אינה מספקת מקורות לניגון.",
+  "This channel uses an insecure http link, which browsers block on a secure https site. Open it in VLC, use an https playlist, or ask the site owner to configure an HTTPS media relay.": "הערוץ משתמש בקישור http לא מאובטח, ודפדפנים חוסמים אותו באתר מאובטח (https). פתחו אותו ב-VLC, השתמשו ברשימת השמעה מסוג https, או בקשו ממנהל האתר להגדיר ממסר מדיה מסוג HTTPS.",
+  "This channel uses a stream type browsers cannot play. Open it in VLC.": "הערוץ משתמש בסוג שידור שדפדפנים אינם יכולים לנגן. פתחו אותו ב-VLC.",
+  "This channel has no valid stream link.": "לערוץ אין קישור שידור תקין."
 }

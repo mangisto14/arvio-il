@@ -3171,6 +3171,7 @@ a.login-submit {
 }
 .player-error p { font-size: 22px; font-weight: 700; margin: 0; }
 .player-error span { color: var(--soft); }
+.player-error-reason { color: var(--soft); font-size: 14px; line-height: 1.4; max-width: 34em; margin-inline: auto; }
 
 .player-bigplay {
   position: absolute;

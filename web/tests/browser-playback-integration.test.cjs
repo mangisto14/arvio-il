@@ -312,6 +312,8 @@ function conversionRecoveryHarness(overrides = {}) {
     stream, settings, videoRef: { current: video }, resumeAtRef, transportRef: { current: null },
     liveTv: overrides.liveTv ?? false, playbackRate: 1, config: { allowNetlifyMediaProxy: false },
     setError: (value) => state.errors.push(value), setErrorDetail: (value) => state.details.push(value),
+    setLiveBlocker: (value) => { state.liveBlocker = value; }, hasResolverConfig: () => false,
+    ...load('lib/iptvPlaybackDiagnostics.ts'),
     setBuffering: noop, setShowControls: noop, setActiveSubtitle: noop, setRemuxTracks: noop,
     setPlayBlocked: value => { state.playBlocked = value; }, DOMException,
     setRemuxAudioIndex: noop, setTransportTracks: noop, defaultSubtitleIndex: () => -1,
@@ -589,7 +591,7 @@ test('Retry retains absolute home-server progress and renegotiates a stopped ser
       ts.isVariableDeclaration(node) && node.name.getText() === 'retryPlayback' && ts.isCallExpression(node.initializer)
         ? node.initializer.arguments[0] : undefined, {
       stream, videoRef: { current: { currentTime: clock } }, resumeAtRef,
-      setError: () => {}, setErrorDetail: () => {}, setBuffering: () => {},
+      setError: () => {}, setErrorDetail: () => {}, setLiveBlocker: () => {}, setBuffering: () => {},
       selectStream: (...args) => selections.push(args),
       setRemuxRestartKey: () => { throw new Error('Do not reopen the stopped server URL'); }
     });
